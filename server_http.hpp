@@ -3,6 +3,7 @@
 
 #include <boost/asio.hpp>
 #include <boost/asio/spawn.hpp>
+#include <boost/thread/future.hpp>
 
 #include <regex>
 #include <unordered_map>
@@ -24,20 +25,15 @@ namespace SimpleWeb {
 
             std::shared_ptr<socket_type> socket;
             
-            std::shared_ptr<boost::asio::deadline_timer> async_timer;
-            
-            std::shared_ptr<bool> async_writing;
-            std::shared_ptr<bool> async_waiting;
-
             Response(boost::asio::io_service& io_service, std::shared_ptr<socket_type> socket, std::shared_ptr<boost::asio::strand> strand, 
                     boost::asio::yield_context& yield): 
-                    strand(strand), yield(yield), socket(socket), async_timer(new boost::asio::deadline_timer(io_service)), 
-                    async_writing(new bool(false)), async_waiting(new bool(false)), stream(&streambuf) {}
+                    strand(strand), yield(yield), socket(socket),
+                    stream(&streambuf) {}
+
+	    Response() = delete;
 
             void async_flush(std::function<void(const boost::system::error_code&)> callback=nullptr) {
-                if(!callback && !socket->lowest_layer().is_open()) {
-                    if(*async_waiting)
-                        async_timer->cancel();
+                if(!socket->lowest_layer().is_open()) {
                     throw std::runtime_error("Broken pipe.");
                 }
                 
@@ -45,32 +41,14 @@ namespace SimpleWeb {
                 std::ostream response(write_buffer.get());
                 response << stream.rdbuf();
                                                     
-                //Wait until previous async_flush is finished
-                strand->dispatch([this](){
-                    if(*async_writing) {
-                        *async_waiting=true;
-                        try {
-                            async_timer->async_wait(yield);
-                        }
-                        catch(std::exception& e) {
-                        }
-                        *async_waiting=false;
-                    }
-                });
-
-                *async_writing=true;
+                //*async_writing=true;
                 
                 auto socket_=this->socket;
-                auto async_writing_=this->async_writing;
-                auto async_timer_=this->async_timer;
-                auto async_waiting_=this->async_waiting;
+                //auto async_writing_=this->async_writing;
                 
                 boost::asio::async_write(*socket, *write_buffer, 
-                        strand->wrap([socket_, write_buffer, callback, async_writing_, async_timer_, async_waiting_]
+                        strand->wrap([socket_, write_buffer, callback]
                         (const boost::system::error_code& ec, size_t bytes_transferred) {
-                    *async_writing_=false;
-                    if(*async_waiting_)
-                        async_timer_->cancel();
                     if(callback)
                         callback(ec);
                 }));
@@ -102,6 +80,8 @@ namespace SimpleWeb {
                 return manip(*this);
             }
         };
+
+	typedef std::shared_ptr<Response> ResponsePtr;
         
         static Response& async_flush(Response& r) {
             r.async_flush();
@@ -129,16 +109,15 @@ namespace SimpleWeb {
             
             boost::asio::streambuf streambuf;
         };
+	
+	typedef std::function<boost::promise<int>(typename ServerBase<socket_type>::ResponsePtr, std::shared_ptr<typename ServerBase<socket_type>::Request>)> ResourceFunction;
         
-        std::unordered_map<std::string, std::unordered_map<std::string, 
-            std::function<void(typename ServerBase<socket_type>::Response&, std::shared_ptr<typename ServerBase<socket_type>::Request>)> > >  resource;
+        std::unordered_map<std::string, std::unordered_map<std::string, ResourceFunction>>  resource;
         
-        std::unordered_map<std::string, 
-            std::function<void(typename ServerBase<socket_type>::Response&, std::shared_ptr<typename ServerBase<socket_type>::Request>)> > default_resource;
+        std::unordered_map<std::string, ResourceFunction> default_resource;
 
     private:
-        std::vector<std::pair<std::string, std::vector<std::pair<std::regex, 
-            std::function<void(typename ServerBase<socket_type>::Response&, std::shared_ptr<typename ServerBase<socket_type>::Request>)> > > > > opt_resource;
+        std::vector<std::pair<std::string, std::vector<std::pair<std::regex, ResourceFunction> > > > opt_resource;
         
     public:
         void start() {
@@ -319,8 +298,7 @@ namespace SimpleWeb {
             }
         }
         
-        void write_response(std::shared_ptr<socket_type> socket, std::shared_ptr<Request> request, 
-                std::function<void(typename ServerBase<socket_type>::Response&, std::shared_ptr<typename ServerBase<socket_type>::Request>)>& resource_function) {
+        void write_response(std::shared_ptr<socket_type> socket, std::shared_ptr<Request> request, ResourceFunction& resource_function) {
             std::shared_ptr<boost::asio::strand> strand(new boost::asio::strand(io_service));
 
             //Set timeout on the following boost::asio::async-read or write function
@@ -329,21 +307,26 @@ namespace SimpleWeb {
                 timer=set_timeout_on_socket(socket, strand, timeout_content);
 
             boost::asio::spawn(*strand, [this, strand, &resource_function, socket, request, timer](boost::asio::yield_context yield) {
-                Response response(io_service, socket, strand, yield);
+                ResponsePtr response(new Response(io_service, socket, strand, yield));
+		boost::promise<int> p;
 
                 try {
-                    resource_function(response, request);
+                    p = resource_function(response, request);
                 }
                 catch(std::exception& e) {
                     return;
                 }
-                
-                response.async_flush([this, socket, request, timer](const boost::system::error_code& ec) {
+		auto flush_lambda = [this, socket, request, timer](const boost::system::error_code& ec) {
                     if(timeout_content>0)
                         timer->cancel();
                     if(!ec && stof(request->http_version)>1.05)
                         read_request_and_content(socket);
-                });
+                };
+		fprintf(stderr, "Resp %p\n", &*response);
+		p.get_future().then( [response, flush_lambda](boost::future<int> f) {
+			fprintf(stderr, "Then %d\n", f.get());
+		       	response->async_flush(flush_lambda);
+			} );
             });
         }
     };

@@ -1,6 +1,9 @@
 Simple-Web-Server
 =================
 
+Note: This is fork of the original library for different purposes. There may
+be undocumented changes.
+
 A very simple, fast, multithreaded, platform independent HTTP and HTTPS server and client library implemented using C++11 and Boost.Asio. Created to be an easy way to make REST resources available from C++ applications. 
 
 See also https://github.com/eidheim/Simple-WebSocket-Server for an easy way to make WebSocket/WebSocket Secure endpoints in C++. 

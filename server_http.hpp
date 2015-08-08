@@ -80,6 +80,8 @@ namespace SimpleWeb {
             Response& operator<<(Response& (*manip)(Response&)) {
                 return manip(*this);
             }
+
+	    boost::future<void> future;
         };
 
 	typedef std::shared_ptr<Response> ResponsePtr;
@@ -344,7 +346,7 @@ namespace SimpleWeb {
                         read_request_and_content(socket);
                 };
 		fprintf(stderr, "Resp %p\n", &*response);
-		p.get_future().then( [response, flush_lambda](boost::future<int> f) {
+		response->future = p.get_future().then( [response, flush_lambda](boost::future<int> f) {
 			fprintf(stderr, "Then %d\n", f.get());
 		       	response->async_flush(flush_lambda);
 			} );
